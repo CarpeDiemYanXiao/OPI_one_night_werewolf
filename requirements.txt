@@ -1,0 +1,5 @@
+# Base dependencies for One Night Werewolf Dealer
+pillow>=9.2.0
+# Audio backends (optional, install if you need sounds/BGM)
+pygame>=2.1.2
+playsound==1.2.2
