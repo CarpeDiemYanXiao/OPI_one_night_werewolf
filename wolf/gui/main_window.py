@@ -44,6 +44,13 @@ class WerewolfApp:
         self.root = root
         self.root.title("一夜终极狼人发牌器")
         self.dealer = WerewolfDealer()
+        # UI 缩放：根据屏幕尺寸相对于设计尺寸 (1000x720) 计算缩放因子（不放大，只缩小）
+        try:
+            sw = self.root.winfo_screenwidth()
+            sh = self.root.winfo_screenheight()
+            self._scale = min(1.0, float(sw) / 1000.0, float(sh) / 720.0)
+        except Exception:
+            self._scale = 1.0
         # 图片缓存，避免 PhotoImage 被 GC
         self._img_cache = {}
         # 音频目录（优先 PyInstaller 解包路径，再回退到源码相对路径）
@@ -69,8 +76,42 @@ class WerewolfApp:
         self._bg_img_tk = None
         self._setup_background()
 
-        frm = ttk.Frame(root, padding=12)
-        frm.pack(fill=tk.BOTH, expand=True)
+        # 主内容区改为可滚动的区域，便于小屏幕滚动查看全部内容
+        canvas = tk.Canvas(root, borderwidth=0, highlightthickness=0)
+        vscroll = ttk.Scrollbar(root, orient='vertical', command=canvas.yview)
+        canvas.configure(yscrollcommand=vscroll.set)
+        vscroll.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        frm = ttk.Frame(canvas, padding=12)
+        canvas.create_window((0, 0), window=frm, anchor='nw')
+
+        def _on_frame_configure(event=None):
+            try:
+                canvas.configure(scrollregion=canvas.bbox('all'))
+            except Exception:
+                pass
+
+        frm.bind('<Configure>', _on_frame_configure)
+
+        # 鼠标滚轮支持（Windows 与 X11）
+        def _on_mousewheel(event):
+            try:
+                # Windows: event.delta；X11: Button-4/5 handled separately
+                canvas.yview_scroll(int(-1 * (event.delta / 120)), 'units')
+            except Exception:
+                try:
+                    # X11 fallback (Linux with button events)
+                    if event.num == 4:
+                        canvas.yview_scroll(-1, 'units')
+                    elif event.num == 5:
+                        canvas.yview_scroll(1, 'units')
+                except Exception:
+                    pass
+
+        # 全局绑定滚轮（在小屏幕上方便滚动）
+        frm.bind_all('<MouseWheel>', _on_mousewheel)
+        frm.bind_all('<Button-4>', _on_mousewheel)
+        frm.bind_all('<Button-5>', _on_mousewheel)
 
         top = ttk.Frame(frm)
         top.pack(fill=tk.X, pady=6)
@@ -659,20 +700,9 @@ class WerewolfApp:
         for w in self.roles_grid.winfo_children():
             w.destroy()
 
-        # 预加载图像
+        # 使用统一的图片加载函数（会根据 self._scale 自动缩放）
         def load_img_for(role_name, size=(140, 210)):
-            path = self._find_image_file(role_name) or self._find_image_file('background')
-            if not path:
-                return None
-            try:
-                try:
-                    resample = Image.Resampling.LANCZOS
-                except Exception:
-                    resample = Image.LANCZOS
-                img = Image.open(path).resize(size, resample)
-                return ImageTk.PhotoImage(img)
-            except Exception:
-                return None
+            return self._load_role_photo(role_name, size, f"tile_{role_name}")
 
         cols = 5
         r = c = 0
@@ -1058,15 +1088,10 @@ class WerewolfApp:
             pframe.grid(row=i, column=0, padx=6, pady=6, sticky='nsew')
             ttk.Label(pframe, text=f"玩家{i+1}").pack(side=tk.TOP)
             img_label = ttk.Label(pframe)
-            img_path = os.path.join(roles_dir, f"{role}.png")
-            if os.path.exists(img_path):
-                try:
-                    img = Image.open(img_path).resize((160, 240), resample)
-                    tk_img = ImageTk.PhotoImage(img)
-                    img_label.config(image=tk_img)
-                    self._img_cache[f"p{i}"] = tk_img
-                except Exception:
-                    pass
+            front = self._load_role_photo(role, (160, 240), f"p{i}", resample)
+            if front:
+                img_label.config(image=front)
+                self._img_cache[f"p{i}"] = front
             img_label.pack(side=tk.TOP, pady=4)
 
         # 中央三张也使用竖排框展示标题和图片
@@ -1076,15 +1101,10 @@ class WerewolfApp:
             cframe.grid(row=base_row + j, column=0, padx=6, pady=6, sticky='nsew')
             ttk.Label(cframe, text=f"中央{j+1}").pack(side=tk.TOP)
             img_label = ttk.Label(cframe)
-            img_path = os.path.join(roles_dir, f"{role}.png")
-            if os.path.exists(img_path):
-                try:
-                    img = Image.open(img_path).resize((180, 270), resample)
-                    tk_img = ImageTk.PhotoImage(img)
-                    img_label.config(image=tk_img)
-                    self._img_cache[f"c{j}"] = tk_img
-                except Exception:
-                    pass
+            front = self._load_role_photo(role, (180, 270), f"c{j}", resample)
+            if front:
+                img_label.config(image=front)
+                self._img_cache[f"c{j}"] = front
             img_label.pack(side=tk.TOP, pady=4)
         # （已移除导出按钮状态切换）
 
@@ -1249,14 +1269,20 @@ class WerewolfApp:
             except Exception:
                 placeholder = None
 
+        # 根据缩放调整占位图大小
+        def _scaled_size(w, h):
+            return (max(1, int(w * getattr(self, '_scale', 1.0))), max(1, int(h * getattr(self, '_scale', 1.0))))
+
         if placeholder:
             try:
-                b = Image.open(placeholder).resize((140, 210), resample)
+                bsize = _scaled_size(140, 210)
+                b = Image.open(placeholder).resize(bsize, resample)
                 self._img_cache['card_back'] = ImageTk.PhotoImage(b)
             except Exception:
                 self._img_cache['card_back'] = None
             try:
-                c = Image.open(placeholder).resize((160, 240), resample)
+                csize = _scaled_size(160, 240)
+                c = Image.open(placeholder).resize(csize, resample)
                 self._img_cache['center_back'] = ImageTk.PhotoImage(c)
             except Exception:
                 self._img_cache['center_back'] = None
@@ -1321,15 +1347,13 @@ class WerewolfApp:
         # 如果未揭示，先揭示并显示名称
         if not self.viewed[idx]:
             role = self.player_roles[idx]
-            img_file = self._find_image_file(role)
             try:
-                if img_file:
-                    try:
-                        resample = Image.Resampling.LANCZOS
-                    except Exception:
-                        resample = Image.LANCZOS
-                    img = Image.open(img_file).resize((180, 270), resample)
-                    tkimg = ImageTk.PhotoImage(img)
+                try:
+                    resample = Image.Resampling.LANCZOS
+                except Exception:
+                    resample = Image.LANCZOS
+                tkimg = self._load_role_photo(role, (180, 270), f'p_real_{idx}', resample)
+                if tkimg:
                     self._img_cache[f'p_real_{idx}'] = tkimg
                     self.viewer_img_lbl.config(image=tkimg)
                 # 显示角色名（中文）
@@ -1511,15 +1535,24 @@ class WerewolfApp:
         img_path = self._find_image_file(role)
         if not img_path:
             return None
+        # compute scaled size according to UI scale
+        try:
+            scale = float(getattr(self, '_scale', 1.0))
+        except Exception:
+            scale = 1.0
+        try:
+            w, h = int(max(1, size[0] * scale)), int(max(1, size[1] * scale))
+        except Exception:
+            w, h = size[0], size[1]
         if not resample:
             try:
                 resample = Image.Resampling.LANCZOS
             except Exception:
                 resample = Image.LANCZOS
         try:
-            img = Image.open(img_path).resize(size, resample)
+            img = Image.open(img_path).resize((w, h), resample)
             photo = ImageTk.PhotoImage(img)
-            self._img_cache[f"{cache_key}_{role}_{size[0]}x{size[1]}"] = photo
+            self._img_cache[f"{cache_key}_{role}_{w}x{h}"] = photo
             return photo
         except Exception:
             return None
